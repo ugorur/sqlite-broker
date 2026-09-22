@@ -41,7 +41,7 @@ spec:
     spec:
       containers:
         - name: broker
-          image: ghcr.io/ugorur/sqlite-broker:0.1.0
+          image: ghcr.io/ugorur/sqlite-broker:0.1.1
           args:
             - serve
             - --storage
@@ -100,7 +100,7 @@ spec:
     spec:
       containers:
         - name: app
-          image: ghcr.io/ugorur/sqlite-broker:0.1.0
+          image: ghcr.io/ugorur/sqlite-broker:0.1.1
           env:
             - name: LD_PRELOAD
               value: /usr/local/lib/libsqlite_broker.so

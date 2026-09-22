@@ -22,11 +22,24 @@ These stacks link the system SQLite library. The Compose files live under [`exam
 
 | Application | Why it fits | Example |
 | --- | --- | --- |
-| [Datasette](https://datasette.io/) | Python standard-library `sqlite3` | [`examples/apps/datasette/docker-compose.yml`](../examples/apps/datasette/docker-compose.yml) |
-| [Nextcloud](https://nextcloud.com/) | Official image defaults to SQLite through PHP `pdo_sqlite` | [`examples/apps/nextcloud/docker-compose.yml`](../examples/apps/nextcloud/docker-compose.yml) |
+| [Datasette](https://datasette.io/) | Python standard-library `sqlite3` on Debian | [`examples/apps/datasette/docker-compose.yml`](../examples/apps/datasette/docker-compose.yml) |
+| [Linkding](https://github.com/sissbruecker/linkding) | Django, SQLite by default, CPython linked to `libsqlite3.so` | [`examples/apps/linkding/docker-compose.yml`](../examples/apps/linkding/docker-compose.yml) |
+| [Nextcloud](https://nextcloud.com/) | Official Apache image uses PHP `pdo_sqlite` | [`examples/apps/nextcloud/docker-compose.yml`](../examples/apps/nextcloud/docker-compose.yml) |
 | [FreshRSS](https://freshrss.org/) | PHP, SQLite is a normal install option, database file under the data volume | [`examples/apps/freshrss/docker-compose.yml`](../examples/apps/freshrss/docker-compose.yml) |
 
-The same shape covers other PHP applications that select SQLite (Wallabag, Shaarli) and other Python applications whose `sqlite3` module is the system one. Mount the stub at the path the application opens, set `LD_PRELOAD`, and leave `app.sqlite` on the broker only.
+The shim covers the calls those stacks make on a connection: prepare, bind (including named parameters, floats, and blobs), step, and the busy-timeout and limit calls they issue at startup. One broker connection runs each statement to completion, so a transaction still blocks every other session.
+
+CPython follows `LD_PRELOAD`. PHP loads `pdo_sqlite` with `RTLD_DEEPBIND`, which skips preload and binds `sqlite3_open` inside `libsqlite3.so.0`. The Nextcloud and FreshRSS examples therefore also set `LD_LIBRARY_PATH` to a directory where that file name is the shim. Symbols the shim does not implement jump to the system library.
+
+A few SQLite features are accepted and then ignored, because they would have to run inside the application process:
+
+- SQL functions and collations registered with `sqlite3_create_function` stay in the client. Linkding ships `libicu.so` for that. The Compose file removes it before startup, and search falls back to SQLite's own collation.
+- Authorizer, trace, and progress hooks are not called.
+- `sqlite3_backup_*`, incremental blob I/O, and `load_extension` return an error if the application actually uses them.
+
+The published library is built on Debian and links glibc. An Alpine image can see `libsqlite3.so` in `ldd` and still refuse to load `libsqlite_broker.so`. Kanboard's official image is that case: its PHP `pdo_sqlite` module is a normal SQLite client, and a glibc build of Kanboard can use the same Compose shape as Nextcloud. The Alpine image cannot.
+
+Linkding also opens `data/tasks.sqlite3` for background jobs. That is a second database. The example turns those jobs off. The broker serves the one file named by `--storage`.
 
 ## Does not work
 

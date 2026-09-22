@@ -7,7 +7,7 @@ The database volume is mounted only on the broker. Application containers mount 
 ## Build locally
 
 ```bash
-docker build -t sqlite-broker:0.1.0 .
+docker build -t sqlite-broker:0.1.1 .
 ```
 
 Published tags follow [versioning](versioning.md).
@@ -40,7 +40,7 @@ LD_PRELOAD=/usr/local/lib/libsqlite_broker.so
 [`examples/Dockerfile.app`](../examples/Dockerfile.app) copies the library out of the broker image:
 
 ```dockerfile
-FROM ghcr.io/ugorur/sqlite-broker:0.1.0 AS sqlite-broker
+FROM ghcr.io/ugorur/sqlite-broker:0.1.1 AS sqlite-broker
 FROM your-app
 COPY --from=sqlite-broker /usr/local/lib/libsqlite_broker.so /usr/local/lib/libsqlite_broker.so
 ENV LD_PRELOAD=/usr/local/lib/libsqlite_broker.so

@@ -179,7 +179,7 @@ checksum = "ba467056f1b547ed52077911161fc86985becbc60e8e1857c8a144dab0def891"
 
 [[package]]
 name = "sqlite-broker"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "rusqlite",
  "sqlite-broker-proto",
@@ -187,7 +187,7 @@ dependencies = [
 
 [[package]]
 name = "sqlite-broker-proto"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -195,7 +195,7 @@ dependencies = [
 
 [[package]]
 name = "sqlite-broker-shim"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "sqlite-broker-proto",

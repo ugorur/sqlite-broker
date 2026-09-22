@@ -3,7 +3,7 @@
 #
 #   docker build -f examples/Dockerfile.app -t your-app:0.1.0 .
 
-ARG SQLITE_BROKER_IMAGE=ghcr.io/ugorur/sqlite-broker:0.1.0
+ARG SQLITE_BROKER_IMAGE=ghcr.io/ugorur/sqlite-broker:0.1.1
 FROM ${SQLITE_BROKER_IMAGE} AS sqlite-broker
 
 FROM debian:bookworm-slim

@@ -1,0 +1,77 @@
+# Linkding on one shared SQLite file.
+# Two processes both migrate, then serve the same bookmarks.
+#
+#   docker compose -f examples/apps/linkding/docker-compose.yml up --build
+#
+# Open http://localhost:9090 and http://localhost:9091.
+# Sign in as admin / change-me.
+#
+# The image links CPython's sqlite3 to libsqlite3.so. libicu.so is removed
+# before startup; that extension would have to be loaded in the broker, and
+# this copy of it only exists in the app image. Background jobs use a second
+# file, data/tasks.sqlite3, so they are left off.
+
+x-linkding: &linkding
+  image: sissbruecker/linkding:latest
+  environment:
+    LD_PRELOAD: /shim/libsqlite_broker.so
+    LD_DISABLE_BACKGROUND_TASKS: "True"
+    LD_SUPERUSER_NAME: admin
+    LD_SUPERUSER_PASSWORD: change-me
+  volumes:
+    - linkding:/etc/linkding/data
+    - shim:/shim:ro
+    - stub:/etc/sqlite-broker:ro
+  entrypoint: ["/bin/bash", "-c"]
+  command:
+    - |
+      mkdir -p /etc/linkding/data
+      cp /etc/sqlite-broker/db.sqlite /etc/linkding/data/db.sqlite3
+      rm -f /etc/linkding/libicu.so
+      exec ./bootstrap.sh
+  depends_on:
+    broker:
+      condition: service_healthy
+
+services:
+  broker:
+    build:
+      context: ../../..
+      dockerfile: Dockerfile
+    image: sqlite-broker:0.1.1
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        cp /usr/local/lib/libsqlite_broker.so /shim/libsqlite_broker.so
+        cp /usr/local/lib/libsqlite_broker.so /shim/libsqlite3.so.0
+        exec sqlite-broker serve \
+          --storage /data/app.sqlite \
+          --stub /stub/db.sqlite \
+          --listen 0.0.0.0:7432 \
+          --advertise broker:7432
+    volumes:
+      - sqlite-data:/data
+      - stub:/stub
+      - shim:/shim
+    healthcheck:
+      test: ["CMD", "/bin/sh", "-c", "test -s /stub/db.sqlite && test -s /shim/libsqlite3.so.0"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  linkding:
+    <<: *linkding
+    ports:
+      - "9090:9090"
+
+  linkding-2:
+    <<: *linkding
+    ports:
+      - "9091:9090"
+
+volumes:
+  sqlite-data:
+  linkding:
+  stub:
+  shim:

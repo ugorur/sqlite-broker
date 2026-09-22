@@ -1,10 +1,10 @@
 # Versions
 
-Releases are Git tags of the form `vMAJOR.MINOR.PATCH`. The tag `v0.1.0` must match `version` in the root `Cargo.toml`:
+Releases are Git tags of the form `vMAJOR.MINOR.PATCH`. The tag must match `version` in the root `Cargo.toml`. The current release is `0.1.1`:
 
 ```toml
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 ```
 
 Pushing the tag builds `ghcr.io/ugorur/sqlite-broker` and publishes these tags:

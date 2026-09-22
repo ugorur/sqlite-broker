@@ -8,7 +8,7 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
-    image: sqlite-broker:0.1.0
+    image: sqlite-broker:0.1.1
     command:
       - serve
       - --storage
@@ -29,7 +29,7 @@ services:
       retries: 20
 
   app:
-    image: sqlite-broker:0.1.0
+    image: sqlite-broker:0.1.1
     environment:
       LD_PRELOAD: /usr/local/lib/libsqlite_broker.so
     volumes:

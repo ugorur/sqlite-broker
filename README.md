@@ -20,7 +20,7 @@ This is for programs that already use SQLite and need more than one process. It 
 - [Docker](docs/docker.md) and [`examples/docker-compose.yml`](examples/docker-compose.yml)
 - [Kubernetes](docs/kubernetes.md) and [`examples/kubernetes/sqlite-broker.yaml`](examples/kubernetes/sqlite-broker.yaml)
 - [Docker Swarm](docs/swarm.md) and [`examples/swarm/stack.yml`](examples/swarm/stack.yml)
-- [Popular applications](docs/apps.md): Datasette, Nextcloud, FreshRSS
+- [Popular applications](docs/apps.md): Datasette, Linkding, Nextcloud, FreshRSS
 - [Versions and image tags](docs/versioning.md)
 
 ## Build

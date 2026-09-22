@@ -5,6 +5,8 @@ use std::process::Command;
 fn main() {
     println!("cargo:rustc-link-lib=sqlite3");
     println!("cargo:rerun-if-changed=../shim/src/lib.rs");
+    println!("cargo:rerun-if-changed=../shim/src/api.rs");
+    println!("cargo:rerun-if-changed=../shim/build.rs");
     println!("cargo:rerun-if-changed=../shim/Cargo.toml");
     println!("cargo:rerun-if-changed=../protocol/src/lib.rs");
 
@@ -22,6 +24,11 @@ fn main() {
         .arg("sqlite-broker-shim")
         .arg("--target-dir")
         .arg(&target_dir);
+    // PROFILE is set by the parent Cargo, but a nested `cargo build` ignores it
+    // and writes the dev profile unless told otherwise.
+    if profile != "debug" {
+        cmd.arg("--profile").arg(&profile);
+    }
     for (key, _) in env::vars() {
         if key.starts_with("CARGO") {
             cmd.env_remove(&key);

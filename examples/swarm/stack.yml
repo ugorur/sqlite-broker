@@ -7,7 +7,7 @@ version: "3.8"
 
 services:
   broker:
-    image: ghcr.io/ugorur/sqlite-broker:0.1.0
+    image: ghcr.io/ugorur/sqlite-broker:0.1.1
     command:
       - serve
       - --storage
@@ -28,7 +28,7 @@ services:
         condition: on-failure
 
   app:
-    image: ghcr.io/ugorur/sqlite-broker:0.1.0
+    image: ghcr.io/ugorur/sqlite-broker:0.1.1
     environment:
       LD_PRELOAD: /usr/local/lib/libsqlite_broker.so
     configs:
@@ -58,7 +58,7 @@ volumes:
 
 configs:
   sqlite_stub:
-    name: sqlite-broker-stub-${TAG:-0.1.0}
+    name: sqlite-broker-stub-${TAG:-0.1.1}
     file: ./db.sqlite
 
 networks:

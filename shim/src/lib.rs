@@ -15,13 +15,28 @@ use std::sync::{LazyLock, Mutex, OnceLock};
 
 use sqlite_broker_proto::{Cell, Hello, Param, Request, Response};
 
+mod api;
+
+include!(concat!(env!("OUT_DIR"), "/forward.rs"));
+
+#[used]
+#[link_section = ".init_array"]
+static INIT_FORWARDERS: unsafe extern "C" fn() = init_real_forwarders;
+
 const SQLITE_OK: i32 = 0;
 const SQLITE_ERROR: i32 = 1;
 const SQLITE_ABORT: i32 = 4;
+const SQLITE_BUSY: i32 = 5;
+const SQLITE_TOOBIG: i32 = 18;
 const SQLITE_CANTOPEN: i32 = 14;
 const SQLITE_MISUSE: i32 = 21;
 const SQLITE_ROW: i32 = 100;
 const SQLITE_DONE: i32 = 101;
+const SQLITE_INTEGER: i32 = 1;
+const SQLITE_FLOAT: i32 = 2;
+const SQLITE_TEXT: i32 = 3;
+const SQLITE_BLOB: i32 = 4;
+const SQLITE_NULL: i32 = 5;
 
 static DBS: LazyLock<Mutex<HashSet<usize>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 static STMTS: LazyLock<Mutex<HashSet<usize>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
@@ -29,42 +44,90 @@ static ALLOCATED: LazyLock<Mutex<HashSet<usize>>> = LazyLock::new(|| Mutex::new(
 
 struct ProxyDb {
     stream: Mutex<TcpStream>,
+    filename: CString,
     errmsg: Mutex<CString>,
     changes: Mutex<i32>,
+    total_changes: Mutex<i32>,
     last_rowid: Mutex<i64>,
     autocommit: Mutex<i32>,
     errcode: Mutex<i32>,
     stmts: Mutex<Vec<usize>>,
+    closed: Mutex<bool>,
 }
 
 struct ProxyStmt {
     db: *const ProxyDb,
     sql: String,
+    sql_c: CString,
     params: Vec<Param>,
     columns: Vec<CString>,
+    decltypes: Vec<Option<CString>>,
+    param_names: Vec<Option<CString>>,
+    param_count: i32,
     rows: Vec<Vec<Cell>>,
     texts: Vec<CString>,
+    blobs: Vec<Vec<u8>>,
     pos: usize,
     started: bool,
     failed: bool,
+    last_step: i32,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|err| err.into_inner())
 }
 
+fn is_this_shim(handle: *mut c_void) -> bool {
+    if handle.is_null() {
+        return false;
+    }
+    let symbol = unsafe { libc::dlsym(handle, c"sqlite3_open".as_ptr()) };
+    !symbol.is_null() && symbol == sqlite3_open as *mut c_void
+}
+
+fn try_open(path: *const c_char) -> *mut c_void {
+    if path.is_null() {
+        return ptr::null_mut();
+    }
+    let handle = unsafe { libc::dlopen(path, libc::RTLD_NOW | libc::RTLD_LOCAL) };
+    if handle.is_null() || is_this_shim(handle) {
+        if !handle.is_null() {
+            unsafe { libc::dlclose(handle) };
+        }
+        return ptr::null_mut();
+    }
+    handle
+}
+
+fn open_real() -> *mut c_void {
+    unsafe {
+        let from_env = libc::getenv(c"SQLITE_BROKER_LIBSQLITE".as_ptr());
+        let opened = try_open(from_env);
+        if !opened.is_null() {
+            return opened;
+        }
+        for path in [
+            c"/usr/lib/x86_64-linux-gnu/libsqlite3.so.0".as_ptr(),
+            c"/lib/x86_64-linux-gnu/libsqlite3.so.0".as_ptr(),
+            c"/usr/lib/aarch64-linux-gnu/libsqlite3.so.0".as_ptr(),
+            c"/lib/aarch64-linux-gnu/libsqlite3.so.0".as_ptr(),
+            c"/usr/lib64/libsqlite3.so.0".as_ptr(),
+            c"/lib64/libsqlite3.so.0".as_ptr(),
+            c"/usr/lib/libsqlite3.so.0".as_ptr(),
+            c"/lib/libsqlite3.so.0".as_ptr(),
+        ] {
+            let opened = try_open(path);
+            if !opened.is_null() {
+                return opened;
+            }
+        }
+        try_open(c"libsqlite3.so.0".as_ptr())
+    }
+}
+
 fn real_lib() -> *mut c_void {
     static LIB: OnceLock<usize> = OnceLock::new();
-    let handle = *LIB.get_or_init(|| unsafe {
-        let name = c"libsqlite3.so.0".as_ptr();
-        let noload = libc::dlopen(name, libc::RTLD_NOW | libc::RTLD_NOLOAD);
-        let handle = if noload.is_null() {
-            libc::dlopen(name, libc::RTLD_NOW)
-        } else {
-            noload
-        };
-        handle as usize
-    });
+    let handle = *LIB.get_or_init(|| open_real() as usize);
     handle as *mut c_void
 }
 
@@ -157,7 +220,7 @@ fn as_stmt<'a>(stmt: *mut c_void) -> Option<&'a ProxyStmt> {
 }
 
 impl ProxyDb {
-    fn connect(addr: &str) -> Result<Self, String> {
+    fn connect(addr: &str, path: &str) -> Result<Self, String> {
         let mut stream =
             TcpStream::connect(addr).map_err(|err| format!("connect {addr}: {err}"))?;
         stream.set_nodelay(true).ok();
@@ -170,17 +233,21 @@ impl ProxyDb {
         }
         Ok(Self {
             stream: Mutex::new(stream),
+            filename: cstring_lossy(path),
             errmsg: Mutex::new(CString::new("not an error").unwrap()),
             changes: Mutex::new(0),
+            total_changes: Mutex::new(0),
             last_rowid: Mutex::new(0),
             autocommit: Mutex::new(1),
             errcode: Mutex::new(0),
             stmts: Mutex::new(Vec::new()),
+            closed: Mutex::new(false),
         })
     }
 
     fn apply(&self, resp: &Response) {
         *lock(&self.changes) = resp.changes;
+        *lock(&self.total_changes) = resp.total_changes;
         *lock(&self.last_rowid) = resp.last_insert_rowid;
         *lock(&self.autocommit) = if resp.autocommit { 1 } else { 0 };
         if resp.ok {
@@ -202,16 +269,14 @@ impl ProxyDb {
         *lock(&self.errmsg) = cstring_lossy(message);
     }
 
-    fn exec_sql(&self, sql: &str, params: Vec<Param>) -> Result<Response, String> {
+    fn rpc(&self, req: &Request) -> Result<Response, String> {
+        if *lock(&self.closed) {
+            self.fail("connection is closed");
+            return Err("connection is closed".to_string());
+        }
         let rpc = {
             let mut stream = lock(&self.stream);
-            match sqlite_broker_proto::write_msg(
-                &mut *stream,
-                &Request::Exec {
-                    sql: sql.to_string(),
-                    params,
-                },
-            ) {
+            match sqlite_broker_proto::write_msg(&mut *stream, req) {
                 Ok(()) => {
                     let parsed: std::io::Result<Response> =
                         sqlite_broker_proto::read_msg(&mut *stream);
@@ -239,11 +304,20 @@ impl ProxyDb {
         }
     }
 
+    fn exec_sql(&self, sql: &str, params: Vec<Param>) -> Result<Response, String> {
+        self.rpc(&Request::Exec {
+            sql: sql.to_string(),
+            params,
+        })
+    }
+
+    fn prepare_meta(&self, sql: &str) -> Result<Response, String> {
+        self.rpc(&Request::Prepare {
+            sql: sql.to_string(),
+        })
+    }
+
     fn shutdown(&self) {
-        let stmts: Vec<usize> = std::mem::take(&mut *lock(&self.stmts));
-        for stmt in stmts {
-            free_stmt_ptr(stmt);
-        }
         let mut stream = lock(&self.stream);
         let _ = sqlite_broker_proto::write_msg(&mut *stream, &Request::Close);
         let _: std::io::Result<Response> = sqlite_broker_proto::read_msg(&mut *stream);
@@ -255,15 +329,6 @@ impl ProxyDb {
 
     fn unlink_stmt(&self, stmt: usize) {
         lock(&self.stmts).retain(|item| *item != stmt);
-    }
-}
-
-fn free_stmt_ptr(stmt: usize) {
-    if lock(&*STMTS).remove(&stmt) {
-        let ptr = stmt as *mut ProxyStmt;
-        let db = unsafe { &*(*ptr).db };
-        db.unlink_stmt(stmt);
-        unsafe { drop(Box::from_raw(ptr)) };
     }
 }
 
@@ -334,7 +399,7 @@ unsafe fn open_v2(
     }
     let path = unsafe { CStr::from_ptr(filename) }.to_string_lossy();
     if let Some(addr) = stub_addr(&path) {
-        match ProxyDb::connect(&addr) {
+        match ProxyDb::connect(&addr, &path) {
             Ok(proxy) => {
                 let raw = Box::into_raw(Box::new(proxy));
                 lock(&*DBS).insert(raw as usize);
@@ -355,31 +420,48 @@ unsafe fn open_v2(
 
 #[no_mangle]
 pub unsafe extern "C" fn sqlite3_close(db: *mut c_void) -> i32 {
-    guard(|| close_db(db))
+    guard(|| close_db(db, false))
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn sqlite3_close_v2(db: *mut c_void) -> i32 {
-    guard(|| close_db(db))
+    guard(|| close_db(db, true))
 }
 
-fn close_db(db: *mut c_void) -> i32 {
+fn close_db(db: *mut c_void, v2: bool) -> i32 {
     if db.is_null() {
         return SQLITE_OK;
     }
-    if !lock(&*DBS).remove(&(db as usize)) {
-        return if let Some(func) = sym::<CloseFn>(b"sqlite3_close\0") {
+    if !is_db(db) {
+        let symbol = if v2 {
+            b"sqlite3_close_v2\0".as_slice()
+        } else {
+            b"sqlite3_close\0".as_slice()
+        };
+        return if let Some(func) = sym::<CloseFn>(symbol) {
             unsafe { func(db) }
         } else {
             SQLITE_ERROR
         };
     }
-    {
-        let proxy = unsafe { &*(db as *const ProxyDb) };
-        proxy.shutdown();
+    let proxy = unsafe { &*(db as *const ProxyDb) };
+    if !v2 && !lock(&proxy.stmts).is_empty() {
+        return SQLITE_BUSY;
     }
-    unsafe { drop(Box::from_raw(db as *mut ProxyDb)) };
+    *lock(&proxy.closed) = true;
+    if lock(&proxy.stmts).is_empty() {
+        destroy_db(db);
+    }
     SQLITE_OK
+}
+
+fn destroy_db(db: *mut c_void) {
+    if !lock(&*DBS).remove(&(db as usize)) {
+        return;
+    }
+    let proxy = unsafe { &*(db as *const ProxyDb) };
+    proxy.shutdown();
+    unsafe { drop(Box::from_raw(db as *mut ProxyDb)) };
 }
 
 #[no_mangle]
@@ -462,6 +544,12 @@ fn exec_sql(
                             changes: resp.changes,
                             last_insert_rowid: resp.last_insert_rowid,
                             autocommit: resp.autocommit,
+                            tail: 0,
+                            param_count: 0,
+                            param_names: Vec::new(),
+                            decltypes: Vec::new(),
+                            total_changes: resp.total_changes,
+                            empty: false,
                         });
                         if !errmsg_out.is_null() {
                             unsafe { *errmsg_out = malloc_cstr("callback aborted") };
@@ -522,20 +610,68 @@ fn prepare_v2(
         let len = unsafe { CStr::from_ptr(sql) }.to_bytes().len();
         unsafe { *pztail = sql.add(len) };
     }
+    let text = unsafe { sql_from(sql, nbytes) };
+    let proxy = unsafe { &*(db as *const ProxyDb) };
+    let resp = match proxy.prepare_meta(&text) {
+        Ok(resp) => resp,
+        Err(_) => return *lock(&proxy.errcode),
+    };
+    let tail = resp.tail.min(text.len());
+    if !pztail.is_null() {
+        unsafe { *pztail = sql.add(tail) };
+    }
+    if resp.empty {
+        return SQLITE_OK;
+    }
+    let stmt_sql = if tail == 0 {
+        text
+    } else {
+        text[..tail].to_string()
+    };
     let stmt = Box::new(ProxyStmt {
         db: db as *const ProxyDb,
-        sql: unsafe { sql_from(sql, nbytes) },
+        sql_c: cstring_lossy(&stmt_sql),
+        sql: stmt_sql,
         params: Vec::new(),
-        columns: Vec::new(),
+        columns: resp
+            .columns
+            .iter()
+            .map(|name| cstring_lossy(name))
+            .collect(),
+        decltypes: resp
+            .decltypes
+            .iter()
+            .map(|name| {
+                if name.is_empty() {
+                    None
+                } else {
+                    Some(cstring_lossy(name))
+                }
+            })
+            .collect(),
+        param_names: resp
+            .param_names
+            .iter()
+            .map(|name| {
+                if name.is_empty() {
+                    None
+                } else {
+                    Some(cstring_lossy(name))
+                }
+            })
+            .collect(),
+        param_count: resp.param_count,
         rows: Vec::new(),
         texts: Vec::new(),
+        blobs: Vec::new(),
         pos: 0,
         started: false,
         failed: false,
+        last_step: 0,
     });
     let raw = Box::into_raw(stmt);
     lock(&*STMTS).insert(raw as usize);
-    unsafe { &*(db as *const ProxyDb) }.link_stmt(raw as usize);
+    proxy.link_stmt(raw as usize);
     unsafe { *ppstmt = raw as *mut c_void };
     SQLITE_OK
 }
@@ -559,11 +695,13 @@ fn step_stmt(stmt_ptr: *mut c_void) -> i32 {
         let db = stmt.db;
         match unsafe { &*db }.exec_sql(&sql, params) {
             Ok(resp) => {
-                stmt.columns = resp
-                    .columns
-                    .iter()
-                    .map(|name| cstring_lossy(name))
-                    .collect();
+                if !resp.columns.is_empty() {
+                    stmt.columns = resp
+                        .columns
+                        .iter()
+                        .map(|name| cstring_lossy(name))
+                        .collect();
+                }
                 stmt.rows = resp.rows;
                 stmt.pos = 0;
                 stmt.failed = false;
@@ -572,31 +710,95 @@ fn step_stmt(stmt_ptr: *mut c_void) -> i32 {
             Err(_) => {
                 stmt.failed = true;
                 stmt.started = true;
-                return SQLITE_ERROR;
+                let code = *lock(&unsafe { &*db }.errcode);
+                let code = if code == 0 { SQLITE_ERROR } else { code };
+                stmt.last_step = code;
+                return code;
             }
         }
     }
     if stmt.failed {
-        return SQLITE_ERROR;
+        return if stmt.last_step == 0 {
+            SQLITE_ERROR
+        } else {
+            stmt.last_step
+        };
     }
     if stmt.pos < stmt.rows.len() {
         stmt.pos += 1;
-        stmt.cache_texts();
+        stmt.cache_row();
+        stmt.last_step = SQLITE_ROW;
         SQLITE_ROW
     } else {
+        stmt.last_step = SQLITE_DONE;
         SQLITE_DONE
     }
 }
 
 impl ProxyStmt {
-    fn cache_texts(&mut self) {
+    fn cache_row(&mut self) {
         self.texts.clear();
+        self.blobs.clear();
         let Some(row) = self.rows.get(self.pos - 1) else {
             return;
         };
         for cell in row {
-            self.texts.push(cstring_lossy(&cell.render()));
+            match cell {
+                Cell::Blob { .. } => {
+                    let bytes = cell.blob_bytes().unwrap_or_default();
+                    self.texts.push(cstring_lossy(&String::from_utf8_lossy(&bytes)));
+                    self.blobs.push(bytes);
+                }
+                other => {
+                    self.texts.push(cstring_lossy(&other.render()));
+                    self.blobs.push(Vec::new());
+                }
+            }
         }
+    }
+
+    fn cell_at(&self, index: i32) -> Option<&Cell> {
+        if self.last_step != SQLITE_ROW || self.pos == 0 || index < 0 {
+            return None;
+        }
+        self.rows
+            .get(self.pos - 1)
+            .and_then(|row| row.get(index as usize))
+    }
+
+    fn text_ptr(&self, index: i32) -> *const u8 {
+        if index < 0 {
+            return ptr::null();
+        }
+        self.texts
+            .get(index as usize)
+            .map(|text| text.as_ptr() as *const u8)
+            .unwrap_or(ptr::null())
+    }
+
+    fn param_index(&self, query: &str) -> i32 {
+        let matches = |name: &CString, wanted: &str| name.to_string_lossy() == wanted;
+        for (i, name) in self.param_names.iter().enumerate() {
+            if let Some(name) = name {
+                if matches(name, query) {
+                    return (i + 1) as i32;
+                }
+            }
+        }
+        if query.starts_with([':', '@', '$', '?']) {
+            return 0;
+        }
+        for prefix in [":", "@", "$"] {
+            let alt = format!("{prefix}{query}");
+            for (i, name) in self.param_names.iter().enumerate() {
+                if let Some(name) = name {
+                    if matches(name, &alt) {
+                        return (i + 1) as i32;
+                    }
+                }
+            }
+        }
+        0
     }
 }
 
@@ -617,8 +819,12 @@ fn finalize_stmt(stmt: *mut c_void) -> i32 {
         };
     }
     let db = unsafe { (*(stmt as *const ProxyStmt)).db };
-    unsafe { &*db }.unlink_stmt(stmt as usize);
+    let proxy = unsafe { &*db };
+    proxy.unlink_stmt(stmt as usize);
     unsafe { drop(Box::from_raw(stmt as *mut ProxyStmt)) };
+    if *lock(&proxy.closed) && lock(&proxy.stmts).is_empty() {
+        destroy_db(db as *mut c_void);
+    }
     SQLITE_OK
 }
 
@@ -636,8 +842,9 @@ pub unsafe extern "C" fn sqlite3_reset(stmt: *mut c_void) -> i32 {
         stmt.failed = false;
         stmt.rows.clear();
         stmt.texts.clear();
-        stmt.columns.clear();
+        stmt.blobs.clear();
         stmt.pos = 0;
+        stmt.last_step = 0;
         SQLITE_OK
     })
 }
@@ -669,12 +876,87 @@ pub unsafe extern "C" fn sqlite3_bind_text(
         if stmt.started || index <= 0 {
             return SQLITE_MISUSE;
         }
-        let text = if value.is_null() {
-            String::new()
+        if value.is_null() {
+            upsert_param(stmt, index, Cell::Null);
         } else {
-            unsafe { sql_from(value, n) }
+            let text = unsafe { sql_from(value, n) };
+            upsert_param(stmt, index, Cell::Text { v: text });
+        }
+        release_destructor(_destructor, value as *mut c_void);
+        SQLITE_OK
+    })
+}
+
+fn release_destructor(dtor: *const c_void, ptr: *mut c_void) {
+    if dtor.is_null() || dtor as isize == -1 || ptr.is_null() {
+        return;
+    }
+    let func: unsafe extern "C" fn(*mut c_void) = unsafe { std::mem::transmute(dtor) };
+    unsafe { func(ptr) };
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sqlite3_bind_double(stmt: *mut c_void, index: i32, value: f64) -> i32 {
+    guard(|| {
+        let Some(stmt) = as_stmt_mut(stmt) else {
+            return if let Some(func) = sym::<unsafe extern "C" fn(*mut c_void, i32, f64) -> i32>(
+                b"sqlite3_bind_double\0",
+            ) {
+                unsafe { func(stmt, index, value) }
+            } else {
+                SQLITE_ERROR
+            };
         };
-        upsert_param(stmt, index, Cell::Text { v: text });
+        if stmt.started || index <= 0 {
+            return SQLITE_MISUSE;
+        }
+        upsert_param(stmt, index, Cell::Real { v: value });
+        SQLITE_OK
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sqlite3_bind_blob(
+    stmt: *mut c_void,
+    index: i32,
+    value: *const c_void,
+    n: i32,
+    dtor: *const c_void,
+) -> i32 {
+    guard(|| {
+        let Some(stmt) = as_stmt_mut(stmt) else {
+            return if let Some(func) = sym::<
+                unsafe extern "C" fn(*mut c_void, i32, *const c_void, i32, *const c_void) -> i32,
+            >(b"sqlite3_bind_blob\0")
+            {
+                unsafe { func(stmt, index, value, n, dtor) }
+            } else {
+                SQLITE_ERROR
+            };
+        };
+        if stmt.started || index <= 0 {
+            return SQLITE_MISUSE;
+        }
+        if value.is_null() && n > 0 {
+            return SQLITE_MISUSE;
+        }
+        if n < 0 {
+            release_destructor(dtor, value as *mut c_void);
+            return SQLITE_TOOBIG;
+        }
+        let bytes = if n == 0 || value.is_null() {
+            Vec::new()
+        } else {
+            unsafe { slice::from_raw_parts(value as *const u8, n as usize).to_vec() }
+        };
+        upsert_param(
+            stmt,
+            index,
+            Cell::Blob {
+                v: sqlite_broker_proto::encode_base64(&bytes),
+            },
+        );
+        release_destructor(dtor, value as *mut c_void);
         SQLITE_OK
     })
 }
@@ -737,13 +1019,10 @@ pub unsafe extern "C" fn sqlite3_column_count(stmt: *mut c_void) -> i32 {
 pub unsafe extern "C" fn sqlite3_column_text(stmt: *mut c_void, i: i32) -> *const u8 {
     match catch_unwind(AssertUnwindSafe(|| {
         if let Some(stmt) = as_stmt(stmt) {
-            if i < 0 {
+            if matches!(stmt.cell_at(i), Some(Cell::Null) | None) {
                 return ptr::null();
             }
-            stmt.texts
-                .get(i as usize)
-                .map(|text| text.as_ptr() as *const u8)
-                .unwrap_or(ptr::null())
+            stmt.text_ptr(i)
         } else if let Some(func) = sym::<ColTextFn>(b"sqlite3_column_text\0") {
             unsafe { func(stmt, i) }
         } else {

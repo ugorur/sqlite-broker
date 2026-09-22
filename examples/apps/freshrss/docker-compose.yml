@@ -13,11 +13,13 @@ services:
     build:
       context: ../../..
       dockerfile: Dockerfile
-    image: sqlite-broker:0.1.0
+    image: sqlite-broker:0.1.1
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
+        set -e
         cp /usr/local/lib/libsqlite_broker.so /shim/libsqlite_broker.so
+        cp /usr/local/lib/libsqlite_broker.so /shim/libsqlite3.so.0
         exec sqlite-broker serve \
           --storage /data/app.sqlite \
           --stub /stub/db.sqlite \
@@ -28,7 +30,7 @@ services:
       - stub:/stub
       - shim:/shim
     healthcheck:
-      test: ["CMD", "/bin/sh", "-c", "test -s /stub/db.sqlite && test -s /shim/libsqlite_broker.so"]
+      test: ["CMD", "/bin/sh", "-c", "test -s /stub/db.sqlite && test -s /shim/libsqlite3.so.0"]
       interval: 2s
       timeout: 3s
       retries: 30
@@ -44,6 +46,7 @@ services:
       TZ: UTC
       CRON_MIN: "*/20"
       LD_PRELOAD: /shim/libsqlite_broker.so
+      LD_LIBRARY_PATH: /shim
     volumes:
       - freshrss:/var/www/FreshRSS/data
       - shim:/shim:ro

@@ -19,8 +19,7 @@ static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
 
 struct Pending {
     id: u64,
-    sql: String,
-    params: Vec<Param>,
+    req: Request,
     reply: Sender<Response>,
 }
 
@@ -156,22 +155,41 @@ impl Worker {
                     let _ = reply.send(ok_closed());
                     self.pump();
                 }
-                Request::Exec { sql, params } => {
+                Request::Exec { .. } | Request::Prepare { .. } => {
                     if matches!(self.holder, Some(holder) if holder != id) {
                         event(&format!("sqlite_broker_event=queued session={id}"));
-                        self.pending.push_back(Pending {
-                            id,
-                            sql,
-                            params,
-                            reply,
-                        });
+                        self.pending.push_back(Pending { id, req, reply });
                         return;
                     }
-                    self.run_exec(id, sql, params, reply);
+                    self.dispatch(id, req, reply);
                     self.pump();
                 }
             },
         }
+    }
+
+    fn dispatch(&mut self, id: u64, req: Request, reply: Sender<Response>) {
+        match req {
+            Request::Exec { sql, params } => self.run_exec(id, sql, params, reply),
+            Request::Prepare { sql } => self.run_prepare(id, sql, reply),
+            Request::Close => {
+                self.drop_session(id);
+                let _ = reply.send(ok_closed());
+            }
+        }
+    }
+
+    fn run_prepare(&mut self, id: u64, sql: String, reply: Sender<Response>) {
+        let response = match self.sessions.get(&id) {
+            Some(conn) => prepare_meta(conn, &sql),
+            None => error_response(true, 1, "no session"),
+        };
+        event(&format!(
+            "sqlite_broker_event=prepare session={id} empty={} sql={}",
+            u8::from(response.empty),
+            sql_brief(&sql)
+        ));
+        let _ = reply.send(response);
     }
 
     fn run_exec(&mut self, id: u64, sql: String, params: Vec<Param>, reply: Sender<Response>) {
@@ -199,7 +217,7 @@ impl Worker {
             let Some(pending) = self.pending.pop_front() else {
                 return;
             };
-            self.run_exec(pending.id, pending.sql, pending.params, pending.reply);
+            self.dispatch(pending.id, pending.req, pending.reply);
         }
     }
 
@@ -250,6 +268,12 @@ fn execute(conn: &Connection, sql: &str, params: &[Param]) -> Response {
             changes: unsafe { ffi::sqlite3_changes(conn.handle()) },
             last_insert_rowid: unsafe { ffi::sqlite3_last_insert_rowid(conn.handle()) },
             autocommit,
+            tail: 0,
+            param_count: 0,
+            param_names: Vec::new(),
+            decltypes: Vec::new(),
+            total_changes: unsafe { ffi::sqlite3_total_changes(conn.handle()) },
+            empty: false,
         },
         Err((code, message)) => Response {
             ok: false,
@@ -260,7 +284,97 @@ fn execute(conn: &Connection, sql: &str, params: &[Param]) -> Response {
             changes: 0,
             last_insert_rowid: unsafe { ffi::sqlite3_last_insert_rowid(conn.handle()) },
             autocommit,
+            tail: 0,
+            param_count: 0,
+            param_names: Vec::new(),
+            decltypes: Vec::new(),
+            total_changes: unsafe { ffi::sqlite3_total_changes(conn.handle()) },
+            empty: false,
         },
+    }
+}
+
+fn prepare_meta(conn: &Connection, sql: &str) -> Response {
+    let autocommit = conn.is_autocommit();
+    let c_sql = match std::ffi::CString::new(sql) {
+        Ok(value) => value,
+        Err(err) => return error_response(autocommit, 1, err.to_string()),
+    };
+    let db = unsafe { conn.handle() };
+    let mut stmt = std::ptr::null_mut();
+    let mut tail: *const std::os::raw::c_char = std::ptr::null();
+    let rc = unsafe { ffi::sqlite3_prepare_v2(db, c_sql.as_ptr(), -1, &mut stmt, &mut tail) };
+    if rc != ffi::SQLITE_OK {
+        let (code, message) = sqlite_error(db);
+        return error_response(autocommit, code, message);
+    }
+    let base = c_sql.as_ptr() as usize;
+    let tail_off = if tail.is_null() {
+        c_sql.as_bytes().len()
+    } else {
+        (tail as usize).saturating_sub(base)
+    };
+    if stmt.is_null() {
+        return Response {
+            ok: true,
+            message: String::new(),
+            code: 0,
+            columns: Vec::new(),
+            rows: Vec::new(),
+            changes: unsafe { ffi::sqlite3_changes(db) },
+            last_insert_rowid: unsafe { ffi::sqlite3_last_insert_rowid(db) },
+            autocommit,
+            tail: tail_off,
+            param_count: 0,
+            param_names: Vec::new(),
+            decltypes: Vec::new(),
+            total_changes: unsafe { ffi::sqlite3_total_changes(db) },
+            empty: true,
+        };
+    }
+    let ncols = unsafe { ffi::sqlite3_column_count(stmt) };
+    let mut columns = Vec::with_capacity(ncols as usize);
+    let mut decltypes = Vec::with_capacity(ncols as usize);
+    for i in 0..ncols {
+        columns.push(cstr_at(unsafe { ffi::sqlite3_column_name(stmt, i) }));
+        decltypes.push(cstr_at(unsafe { ffi::sqlite3_column_decltype(stmt, i) }));
+    }
+    let param_count = unsafe { ffi::sqlite3_bind_parameter_count(stmt) };
+    let mut param_names = Vec::with_capacity(param_count as usize);
+    for i in 1..=param_count {
+        let name = unsafe { ffi::sqlite3_bind_parameter_name(stmt, i) };
+        param_names.push(if name.is_null() {
+            String::new()
+        } else {
+            cstr_at(name)
+        });
+    }
+    unsafe { ffi::sqlite3_finalize(stmt) };
+    Response {
+        ok: true,
+        message: String::new(),
+        code: 0,
+        columns,
+        rows: Vec::new(),
+        changes: unsafe { ffi::sqlite3_changes(db) },
+        last_insert_rowid: unsafe { ffi::sqlite3_last_insert_rowid(db) },
+        autocommit,
+        tail: tail_off,
+        param_count,
+        param_names,
+        decltypes,
+        total_changes: unsafe { ffi::sqlite3_total_changes(db) },
+        empty: false,
+    }
+}
+
+fn cstr_at(ptr: *const std::os::raw::c_char) -> String {
+    if ptr.is_null() {
+        String::new()
+    } else {
+        unsafe { std::ffi::CStr::from_ptr(ptr) }
+            .to_string_lossy()
+            .into_owned()
     }
 }
 
@@ -356,6 +470,24 @@ fn bind_all(stmt: *mut ffi::sqlite3_stmt, params: &[Param]) -> Result<(), String
                     )
                 }
             }
+            Cell::Blob { v } => {
+                let bytes = sqlite_broker_proto::decode_base64(v)
+                    .map_err(|_| format!("bind {} blob is not base64", param.index))?;
+                let ptr = if bytes.is_empty() {
+                    std::ptr::null()
+                } else {
+                    bytes.as_ptr() as *const std::ffi::c_void
+                };
+                unsafe {
+                    ffi::sqlite3_bind_blob(
+                        stmt,
+                        param.index,
+                        ptr,
+                        bytes.len() as i32,
+                        ffi::SQLITE_TRANSIENT(),
+                    )
+                }
+            }
         };
         if rc != ffi::SQLITE_OK {
             return Err(format!("bind {} failed ({rc})", param.index));
@@ -377,6 +509,19 @@ fn read_row(stmt: *mut ffi::sqlite3_stmt, ncols: i32) -> Vec<Cell> {
         } else if kind == ffi::SQLITE_FLOAT {
             Cell::Real {
                 v: unsafe { ffi::sqlite3_column_double(stmt, i) },
+            }
+        } else if kind == ffi::SQLITE_BLOB {
+            let n = unsafe { ffi::sqlite3_column_bytes(stmt, i) };
+            let ptr = unsafe { ffi::sqlite3_column_blob(stmt, i) };
+            if n <= 0 || ptr.is_null() {
+                Cell::Blob { v: String::new() }
+            } else {
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(ptr as *const u8, n as usize)
+                };
+                Cell::Blob {
+                    v: sqlite_broker_proto::encode_base64(bytes),
+                }
             }
         } else {
             let ptr = unsafe { ffi::sqlite3_column_text(stmt, i) };
@@ -427,6 +572,12 @@ fn ok_closed() -> Response {
         changes: 0,
         last_insert_rowid: 0,
         autocommit: true,
+        tail: 0,
+        param_count: 0,
+        param_names: Vec::new(),
+        decltypes: Vec::new(),
+        total_changes: 0,
+        empty: false,
     }
 }
 
@@ -440,6 +591,12 @@ fn error_response(autocommit: bool, code: i32, message: impl Into<String>) -> Re
         changes: 0,
         last_insert_rowid: 0,
         autocommit,
+        tail: 0,
+        param_count: 0,
+        param_names: Vec::new(),
+        decltypes: Vec::new(),
+        total_changes: 0,
+        empty: false,
     }
 }
 
