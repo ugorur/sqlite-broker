@@ -1,10 +1,10 @@
 [package]
 name = "sqlite-broker-shim"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 description = "LD_PRELOAD shim that forwards sqlite3_open to sqlite-broker"
-license = "MIT"
-repository = "https://github.com/ugorur/sqlite-broker"
+license.workspace = true
+repository.workspace = true
 
 [lib]
 name = "sqlite_broker"

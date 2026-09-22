@@ -1,0 +1,125 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sqlite-broker
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: sqlite-data
+  namespace: sqlite-broker
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sqlite-broker-stub
+  namespace: sqlite-broker
+data:
+  db.sqlite: |
+    SQLITEBROKER1
+    sqlite-broker:7432
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sqlite-broker
+  namespace: sqlite-broker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sqlite-broker
+  template:
+    metadata:
+      labels:
+        app: sqlite-broker
+    spec:
+      containers:
+        - name: broker
+          image: ghcr.io/ugorur/sqlite-broker:0.1.0
+          args:
+            - serve
+            - --storage
+            - /data/app.sqlite
+            - --stub
+            - /stub/db.sqlite
+            - --listen
+            - 0.0.0.0:7432
+            - --advertise
+            - sqlite-broker:7432
+          ports:
+            - name: sql
+              containerPort: 7432
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: stub
+              mountPath: /stub
+          readinessProbe:
+            exec:
+              command: ["sqlite-broker", "version"]
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: sqlite-data
+        - name: stub
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sqlite-broker
+  namespace: sqlite-broker
+spec:
+  selector:
+    app: sqlite-broker
+  ports:
+    - name: sql
+      port: 7432
+      targetPort: sql
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+  namespace: sqlite-broker
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: sqlite-broker-app
+  template:
+    metadata:
+      labels:
+        app: sqlite-broker-app
+    spec:
+      containers:
+        - name: app
+          image: ghcr.io/ugorur/sqlite-broker:0.1.0
+          env:
+            - name: LD_PRELOAD
+              value: /usr/local/lib/libsqlite_broker.so
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              i=0
+              while true; do
+                i=$((i + 1))
+                sqlite-broker call --db /etc/sqlite-broker/db.sqlite \
+                  --sql "CREATE TABLE IF NOT EXISTS note(id INTEGER PRIMARY KEY, msg TEXT)" \
+                  --sql "INSERT INTO note(msg) VALUES ('pod $HOSTNAME #$i')"
+                sleep 3
+              done
+          volumeMounts:
+            - name: stub
+              mountPath: /etc/sqlite-broker
+              readOnly: true
+      volumes:
+        - name: stub
+          configMap:
+            name: sqlite-broker-stub

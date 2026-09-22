@@ -1,10 +1,10 @@
 [package]
 name = "sqlite-broker"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 description = "One SQLite file for many processes"
-license = "MIT"
-repository = "https://github.com/ugorur/sqlite-broker"
+license.workspace = true
+repository.workspace = true
 
 [[bin]]
 name = "sqlite-broker"

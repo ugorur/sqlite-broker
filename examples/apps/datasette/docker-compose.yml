@@ -1,0 +1,67 @@
+# Datasette (Python sqlite3) in front of one sqlite-broker file.
+# Two replicas publish different host ports. Both open the stub.
+#
+#   docker compose -f examples/apps/datasette/docker-compose.yml up --build
+#
+# Check that this Datasette image really links libsqlite3:
+#   docker run --rm --entrypoint python datasetteproject/datasette:latest \
+#     -c 'import sqlite3; print(sqlite3.__file__)'
+
+x-datasette: &datasette
+  image: datasetteproject/datasette:latest
+  environment:
+    LD_PRELOAD: /shim/libsqlite_broker.so
+  volumes:
+    - shim:/shim:ro
+    - stub:/etc/sqlite-broker:ro
+  command:
+    - datasette
+    - serve
+    - /etc/sqlite-broker/db.sqlite
+    - --host
+    - 0.0.0.0
+    - --port
+    - "8001"
+  depends_on:
+    broker:
+      condition: service_healthy
+
+services:
+  broker:
+    build:
+      context: ../../..
+      dockerfile: Dockerfile
+    image: sqlite-broker:0.1.0
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        cp /usr/local/lib/libsqlite_broker.so /shim/libsqlite_broker.so
+        exec sqlite-broker serve \
+          --storage /data/app.sqlite \
+          --stub /stub/db.sqlite \
+          --listen 0.0.0.0:7432 \
+          --advertise broker:7432
+    volumes:
+      - sqlite-data:/data
+      - stub:/stub
+      - shim:/shim
+    healthcheck:
+      test: ["CMD", "/bin/sh", "-c", "test -s /stub/db.sqlite && test -s /shim/libsqlite_broker.so"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  datasette:
+    <<: *datasette
+    ports:
+      - "8001:8001"
+
+  datasette-2:
+    <<: *datasette
+    ports:
+      - "8002:8001"
+
+volumes:
+  sqlite-data:
+  stub:
+  shim:

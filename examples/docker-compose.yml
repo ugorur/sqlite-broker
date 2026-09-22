@@ -1,0 +1,57 @@
+# One broker, three application processes, one SQLite file.
+#   docker compose -f examples/docker-compose.yml up --build
+#
+# The database volume is mounted on the broker only.
+
+services:
+  broker:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: sqlite-broker:0.1.0
+    command:
+      - serve
+      - --storage
+      - /data/app.sqlite
+      - --stub
+      - /stub/db.sqlite
+      - --listen
+      - 0.0.0.0:7432
+      - --advertise
+      - broker:7432
+    volumes:
+      - sqlite-data:/data
+      - stub:/stub
+    healthcheck:
+      test: ["CMD", "/bin/sh", "-c", "test -s /stub/db.sqlite"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  app:
+    image: sqlite-broker:0.1.0
+    environment:
+      LD_PRELOAD: /usr/local/lib/libsqlite_broker.so
+    volumes:
+      - stub:/stub:ro
+    depends_on:
+      broker:
+        condition: service_healthy
+    deploy:
+      replicas: 3
+    command:
+      - /bin/sh
+      - -c
+      - |
+        i=0
+        while true; do
+          i=$$((i + 1))
+          sqlite-broker call --db /stub/db.sqlite \
+            --sql "CREATE TABLE IF NOT EXISTS note(id INTEGER PRIMARY KEY, msg TEXT)" \
+            --sql "INSERT INTO note(msg) VALUES ('replica $$HOSTNAME #$$i')"
+          sleep 3
+        done
+
+volumes:
+  sqlite-data:
+  stub:

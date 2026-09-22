@@ -48,7 +48,12 @@ struct Worker {
     pending: VecDeque<Pending>,
 }
 
-pub fn serve(storage: PathBuf, stub: PathBuf, listen: &str) -> Result<(), String> {
+pub fn serve(
+    storage: PathBuf,
+    stub: PathBuf,
+    listen: &str,
+    advertise: Option<&str>,
+) -> Result<(), String> {
     if let Some(parent) = storage.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent).map_err(|err| err.to_string())?;
@@ -63,7 +68,8 @@ pub fn serve(storage: PathBuf, stub: PathBuf, listen: &str) -> Result<(), String
     let addr = listener
         .local_addr()
         .map_err(|err| format!("local_addr: {err}"))?;
-    write_stub(&stub, &addr.to_string())?;
+    let published = advertise.unwrap_or(&addr.to_string()).to_string();
+    write_stub(&stub, &published)?;
 
     let (tx, rx) = mpsc::channel();
     let accept_tx = tx.clone();
@@ -71,7 +77,7 @@ pub fn serve(storage: PathBuf, stub: PathBuf, listen: &str) -> Result<(), String
     drop(tx);
 
     println!(
-        "ready listen={addr} stub={} storage={}",
+        "ready listen={addr} advertise={published} stub={} storage={}",
         stub.display(),
         storage.display()
     );

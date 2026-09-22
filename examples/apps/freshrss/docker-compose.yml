@@ -1,0 +1,60 @@
+# FreshRSS stores its SQLite database under /var/www/FreshRSS/data.
+# Install once with SQLite selected, find the .sqlite file, and keep that
+# path pointed at the stub below. The broker volume is the only real database.
+#
+#   docker compose -f examples/apps/freshrss/docker-compose.yml up --build
+#
+# The default file after the first user is created is:
+#   /var/www/FreshRSS/data/users/<user>/db.sqlite
+# Replace that file with /etc/sqlite-broker/db.sqlite from the stub volume.
+
+services:
+  broker:
+    build:
+      context: ../../..
+      dockerfile: Dockerfile
+    image: sqlite-broker:0.1.0
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        cp /usr/local/lib/libsqlite_broker.so /shim/libsqlite_broker.so
+        exec sqlite-broker serve \
+          --storage /data/app.sqlite \
+          --stub /stub/db.sqlite \
+          --listen 0.0.0.0:7432 \
+          --advertise broker:7432
+    volumes:
+      - sqlite-data:/data
+      - stub:/stub
+      - shim:/shim
+    healthcheck:
+      test: ["CMD", "/bin/sh", "-c", "test -s /stub/db.sqlite && test -s /shim/libsqlite_broker.so"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  freshrss:
+    image: freshrss/freshrss:latest
+    depends_on:
+      broker:
+        condition: service_healthy
+    ports:
+      - "8081:80"
+    environment:
+      TZ: UTC
+      CRON_MIN: "*/20"
+      LD_PRELOAD: /shim/libsqlite_broker.so
+    volumes:
+      - freshrss:/var/www/FreshRSS/data
+      - shim:/shim:ro
+      - stub:/etc/sqlite-broker:ro
+    # Leave the image entrypoint alone. After the first SQLite install, copy
+    # /etc/sqlite-broker/db.sqlite over the file FreshRSS created:
+    #   /var/www/FreshRSS/data/users/<user>/db.sqlite
+    # Restart with LD_PRELOAD still set. Do not copy app.sqlite into this volume.
+
+volumes:
+  sqlite-data:
+  freshrss:
+  stub:
+  shim:

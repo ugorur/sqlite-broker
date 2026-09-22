@@ -572,3 +572,36 @@ fn three_clients_queue_onto_one_database() {
     println!("overlap_ok rows=3 queued_before_release");
     drop(server);
 }
+
+#[test]
+fn stub_publishes_the_advertise_address() {
+    let (bin, _) = artifacts();
+    let dir = Tmp::new("advertise");
+    let storage = dir.0.join("storage.sqlite");
+    let stub = dir.0.join("db.sqlite");
+    let mut child = Command::new(&bin)
+        .args([
+            "serve",
+            "--storage",
+            storage.to_str().unwrap(),
+            "--stub",
+            stub.to_str().unwrap(),
+            "--listen",
+            "127.0.0.1:0",
+            "--advertise",
+            "broker:7432",
+        ])
+        .env_remove("LD_PRELOAD")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn serve");
+    let mut out = Lines::from_reader(child.stdout.take().unwrap());
+    let ready = out.wait_has(|line| line.starts_with("ready "), Duration::from_secs(5));
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(ready, "{}", out.snapshot());
+    let text = fs::read_to_string(&stub).unwrap();
+    assert_eq!(text, "SQLITEBROKER1\nbroker:7432\n");
+}

@@ -14,6 +14,15 @@ This is for programs that already use SQLite and need more than one process. It 
 
 `/usr/bin/sqlite3` on many systems does not link `libsqlite3.so`, so preload does not apply to that binary. Use it to inspect the real storage file. Programs that embed SQLite statically, including `better-sqlite3`, are also outside the shim. Those need a build that links the system library.
 
+## Guides
+
+- [Standalone](docs/standalone.md) on one machine
+- [Docker](docs/docker.md) and [`examples/docker-compose.yml`](examples/docker-compose.yml)
+- [Kubernetes](docs/kubernetes.md) and [`examples/kubernetes/sqlite-broker.yaml`](examples/kubernetes/sqlite-broker.yaml)
+- [Docker Swarm](docs/swarm.md) and [`examples/swarm/stack.yml`](examples/swarm/stack.yml)
+- [Popular applications](docs/apps.md): Datasette, Nextcloud, FreshRSS
+- [Versions and image tags](docs/versioning.md)
+
 ## Build
 
 ```bash

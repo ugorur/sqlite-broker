@@ -1,0 +1,66 @@
+# One broker replica, three application replicas.
+#   docker stack deploy -c examples/swarm/stack.yml sqlite-broker
+#
+# app.sqlite is on the broker volume only. The stub is a config.
+
+version: "3.8"
+
+services:
+  broker:
+    image: ghcr.io/ugorur/sqlite-broker:0.1.0
+    command:
+      - serve
+      - --storage
+      - /data/app.sqlite
+      - --stub
+      - /stub/db.sqlite
+      - --listen
+      - 0.0.0.0:7432
+      - --advertise
+      - broker:7432
+    volumes:
+      - sqlite-data:/data
+      - stub:/stub
+    networks: [internal]
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+
+  app:
+    image: ghcr.io/ugorur/sqlite-broker:0.1.0
+    environment:
+      LD_PRELOAD: /usr/local/lib/libsqlite_broker.so
+    configs:
+      - source: sqlite_stub
+        target: /etc/sqlite-broker/db.sqlite
+    command:
+      - /bin/sh
+      - -c
+      - |
+        i=0
+        while true; do
+          i=$$((i + 1))
+          sqlite-broker call --db /etc/sqlite-broker/db.sqlite \
+            --sql "CREATE TABLE IF NOT EXISTS note(id INTEGER PRIMARY KEY, msg TEXT)" \
+            --sql "INSERT INTO note(msg) VALUES ('task $$HOSTNAME #$$i')"
+          sleep 3
+        done
+    networks: [internal]
+    deploy:
+      replicas: 3
+      restart_policy:
+        condition: on-failure
+
+volumes:
+  sqlite-data:
+  stub:
+
+configs:
+  sqlite_stub:
+    name: sqlite-broker-stub-${TAG:-0.1.0}
+    file: ./db.sqlite
+
+networks:
+  internal:
+    driver: overlay

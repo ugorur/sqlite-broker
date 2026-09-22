@@ -1,10 +1,10 @@
 [package]
 name = "sqlite-broker-proto"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 description = "Wire format for sqlite-broker"
-license = "MIT"
-repository = "https://github.com/ugorur/sqlite-broker"
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

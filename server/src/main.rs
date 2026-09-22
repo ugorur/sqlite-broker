@@ -9,11 +9,12 @@ use std::process;
 
 const USAGE: &str = "\
 usage:
-  sqlite-broker serve --storage FILE --stub FILE [--listen ADDR]
+  sqlite-broker serve --storage FILE --stub FILE [--listen ADDR] [--advertise HOST:PORT]
   sqlite-broker call --db FILE --sql SQL [--sql SQL ...]
   sqlite-broker session --db FILE
   sqlite-broker hammer --db FILE --worker N [--ops 1000] [--seed N]
-  sqlite-broker storm [--apps 10] [--ops 1000] [--dir PATH]";
+  sqlite-broker storm [--apps 10] [--ops 1000] [--dir PATH]
+  sqlite-broker version";
 
 fn main() {
     if let Err(err) = dispatch() {
@@ -30,6 +31,10 @@ fn dispatch() -> Result<(), String> {
         Some("session") => session_cli(args),
         Some("hammer") => hammer::hammer_cli(args),
         Some("storm") => hammer::storm_cli(args),
+        Some("version" | "--version" | "-V") => {
+            println!("sqlite-broker {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
         Some("-h" | "--help") => {
             println!("{USAGE}");
             Ok(())
@@ -48,18 +53,20 @@ fn serve_cli(args: impl Iterator<Item = String>) -> Result<(), String> {
     let mut storage = None;
     let mut stub = None;
     let mut listen = "127.0.0.1:0".to_string();
+    let mut advertise = None;
     let mut args = args;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--storage" => storage = Some(PathBuf::from(take(&mut args, "--storage")?)),
             "--stub" => stub = Some(PathBuf::from(take(&mut args, "--stub")?)),
             "--listen" => listen = take(&mut args, "--listen")?,
+            "--advertise" => advertise = Some(take(&mut args, "--advertise")?),
             other => return Err(format!("unknown argument {other}")),
         }
     }
     let storage = storage.ok_or("missing --storage")?;
     let stub = stub.ok_or("missing --stub")?;
-    broker::serve(storage, stub, &listen)
+    broker::serve(storage, stub, &listen, advertise.as_deref())
 }
 
 fn call_cli(args: impl Iterator<Item = String>) -> Result<(), String> {
