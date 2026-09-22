@@ -1,0 +1,15 @@
+[package]
+name = "sqlite-broker"
+version = "0.1.0"
+edition = "2021"
+description = "One SQLite file for many processes"
+license = "MIT"
+repository = "https://github.com/ugorur/sqlite-broker"
+
+[[bin]]
+name = "sqlite-broker"
+path = "src/main.rs"
+
+[dependencies]
+rusqlite = "0.32"
+sqlite-broker-proto = { path = "../protocol" }
